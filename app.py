@@ -1190,15 +1190,27 @@ elif page == "Investment Tracker":
             # Inflation metrics
             latest_ipca = 0
             ipca_12m = 0
+            cum_inflation = 1.0
             if not ipca_df.empty:
                 latest_ipca = ipca_df["valor"].iloc[-1]
                 ipca_last_12 = ipca_df.tail(12)
                 if len(ipca_last_12) > 0:
                     ipca_12m = ((1 + ipca_last_12["valor"] / 100).prod() - 1) * 100
 
-            # Simple real return: nominal return% minus 12-month inflation
-            real_return_pct = return_pct - ipca_12m
-            real_growth = total_growth - (total_contrib * ipca_12m / 100)
+                # Cumulative IPCA from first entry to now
+                first_month = first_date.replace(day=1)
+                ipca_filtered = ipca_df[ipca_df["data"] > first_month]
+                if not ipca_filtered.empty:
+                    cum_inflation = (1 + ipca_filtered["valor"] / 100).prod()
+
+            # Real return: V_real = V_nominal / cum_inflation, then compare to contributions
+            if total_contrib > 0:
+                real_balance = latest_balance / cum_inflation
+                real_growth = real_balance - total_contrib
+                real_return_pct = (real_growth / total_contrib * 100)
+            else:
+                real_growth = 0
+                real_return_pct = 0
 
             c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
