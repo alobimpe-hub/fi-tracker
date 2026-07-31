@@ -1,0 +1,6 @@
+streamlit
+numpy-financial
+numpy
+pandas
+plotly
+requests
