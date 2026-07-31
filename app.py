@@ -1137,7 +1137,7 @@ elif page == "Investment Tracker":
                     entry_month = entry_dt.replace(day=1)
 
                     ipca_between = ipca_df[
-                        (ipca_df["data"] > base_month)
+                        (ipca_df["data"] >= base_month)
                         & (ipca_df["data"] <= entry_month)
                     ]
                     cum_inflation = 1.0
@@ -1199,7 +1199,7 @@ elif page == "Investment Tracker":
 
                 # Cumulative IPCA from first entry to now
                 first_month = first_date.replace(day=1)
-                ipca_filtered = ipca_df[ipca_df["data"] > first_month]
+                ipca_filtered = ipca_df[ipca_df["data"] >= first_month]
                 if not ipca_filtered.empty:
                     cum_inflation = (1 + ipca_filtered["valor"] / 100).prod()
 
@@ -1229,6 +1229,8 @@ elif page == "Investment Tracker":
                     fmt_brl(real_growth),
                     delta=f"{real_return_pct:+.1f}% real",
                 )
+                if cum_inflation == 1.0 and total_contrib > 0:
+                    st.caption("IPCA data not yet available for this period")
             with c5:
                 st.metric(
                     "Cumulative Growth %",
