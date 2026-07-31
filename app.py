@@ -1236,11 +1236,50 @@ elif page == "Investment Tracker":
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             st.caption("*Cumulative Growth* = balance minus all contributions. *Change* = increase since last entry.")
 
+            # Edit entries
+            with st.expander("Edit an Entry"):
+                edit_options = [f"{e['id']}: {e['entry_date']} — {fmt_brl(e['total_balance'])}" for e in entries]
+                if edit_options:
+                    selected_edit = st.selectbox("Select entry to edit", edit_options, key="edit_inv")
+                    if selected_edit:
+                        edit_id = int(selected_edit.split(":")[0])
+                        edit_entry = conn.execute(
+                            "SELECT entry_date, contribution, total_balance, notes FROM investment_log WHERE id = ?",
+                            (edit_id,),
+                        ).fetchone()
+                        if edit_entry:
+                            with st.form("edit_inv_form"):
+                                new_date = st.date_input("Date", value=datetime.strptime(edit_entry["entry_date"], "%Y-%m-%d"))
+                                new_contrib_raw = st.text_input(
+                                    "Contribution (R$)",
+                                    value=fmt_brl(edit_entry["contribution"]).replace("R$ ", ""),
+                                )
+                                new_balance_raw = st.text_input(
+                                    "Total Balance (R$)",
+                                    value=fmt_brl(edit_entry["total_balance"]).replace("R$ ", ""),
+                                )
+                                new_notes = st.text_input("Notes", value=edit_entry["notes"] or "")
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    if st.form_submit_button("💾 Save Changes", use_container_width=True):
+                                        c = parse_brl(new_contrib_raw) if new_contrib_raw else 0
+                                        b = parse_brl(new_balance_raw) if new_balance_raw else 0
+                                        conn.execute(
+                                            "UPDATE investment_log SET entry_date=?, contribution=?, total_balance=?, notes=? WHERE id=?",
+                                            (new_date.isoformat(), c, b, new_notes, edit_id),
+                                        )
+                                        conn.commit()
+                                        st.success("Entry updated!")
+                                        st.rerun()
+                                with c2:
+                                    st.caption("")
+
             # Delete entries
             with st.expander("Delete Entries"):
                 to_delete = st.multiselect(
                     "Select entries to delete",
                     [f"{e['id']}: {e['entry_date']}" for e in entries],
+                    key="inv_delete",
                 )
                 if to_delete and st.button("🗑️ Delete Selected"):
                     for item in to_delete:
