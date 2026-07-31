@@ -114,6 +114,37 @@ def init_db():
             withdrawal_rate REAL NOT NULL DEFAULT 4.0,
             updated_at TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS mortgage_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            current_balance REAL NOT NULL,
+            remaining_months INTEGER NOT NULL,
+            monthly_payment REAL NOT NULL,
+            interest_rate REAL NOT NULL DEFAULT 0,
+            start_date TEXT NOT NULL,
+            insurance REAL DEFAULT 0,
+            fees REAL DEFAULT 0,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS mortgage_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status_id INTEGER NOT NULL,
+            log_date TEXT NOT NULL,
+            payment_total REAL DEFAULT 0,
+            principal REAL DEFAULT 0,
+            interest REAL DEFAULT 0,
+            insurance REAL DEFAULT 0,
+            fees REAL DEFAULT 0,
+            extra_payment REAL DEFAULT 0,
+            balance_after REAL NOT NULL,
+            remaining_months_after INTEGER,
+            notes TEXT,
+            is_correcao INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (status_id) REFERENCES mortgage_status(id)
+        );
     """
     )
     conn.commit()
@@ -345,67 +376,41 @@ if page == "Dashboard":
     with col1:
         st.subheader("🏠 Mortgage")
         conn = get_db()
-        plans = conn.execute(
-            "SELECT id, name, loan_amount, annual_rate, start_date, term_months "
-            "FROM mortgage_plans ORDER BY created_at DESC LIMIT 1"
+        status = conn.execute(
+            "SELECT id, name, current_balance, remaining_months, monthly_payment, "
+            "interest_rate, start_date FROM mortgage_status ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        if plans:
-            plan = plans
-            paid = conn.execute(
-                "SELECT SUM(actual_extra) as total_extras, COUNT(*) as paid_count "
-                "FROM payment_status WHERE plan_id = ? AND is_paid = 1",
-                (plan["id"],),
+        if status:
+            logs = conn.execute(
+                "SELECT COUNT(*) as cnt, SUM(principal) as total_principal, "
+                "SUM(interest) as total_interest, SUM(extra_payment) as total_extras "
+                "FROM mortgage_log WHERE status_id = ?",
+                (status["id"],),
             ).fetchone()
-            schedule = generate_schedule(
-                plan["loan_amount"],
-                plan["annual_rate"],
-                plan["term_months"],
-                datetime.strptime(plan["start_date"], "%Y-%m-%d"),
-            )
-            orig_payoff, orig_n = find_original_payoff(schedule)
-            paid_map = {}
-            for row in conn.execute(
-                "SELECT payment_number, is_paid, actual_extra FROM payment_status WHERE plan_id = ?",
-                (plan["id"],),
-            ):
-                paid_map[row["payment_number"]] = {
-                    "is_paid": row["is_paid"],
-                    "actual_extra": row["actual_extra"],
-                }
+            initial_log = conn.execute(
+                "SELECT balance_after FROM mortgage_log WHERE status_id = ? AND is_correcao = 0 "
+                "ORDER BY log_date LIMIT 1",
+                (status["id"],),
+            ).fetchone()
 
-            checkpoints = []
-            for row in conn.execute(
-                "SELECT checkpoint_date, bank_balance FROM balance_checkpoints WHERE plan_id = ? ORDER BY checkpoint_date",
-                (plan["id"],),
-            ):
-                checkpoints.append(dict(row))
-
-            actual_balance, last_paid, tr_adj = recalc_remaining(
-                schedule, paid_map, plan["loan_amount"], checkpoints
-            )
-            monthly_rate = plan["annual_rate"] / 100.0 / 12.0
-            rem_months = (
-                projected_payoff(
-                    actual_balance,
-                    monthly_rate,
-                    schedule[0]["scheduled_payment"] if schedule else 0,
-                )
-                if actual_balance > 0
+            initial_balance = initial_log["balance_after"] if initial_log else status["current_balance"]
+            paid_pct = (
+                (1 - status["current_balance"] / initial_balance) * 100
+                if initial_balance > 0
                 else 0
             )
 
-            st.metric("Original Loan", fmt_brl(plan["loan_amount"]))
+            st.metric("Remaining Balance", fmt_brl(status["current_balance"]))
             st.metric(
-                "Remaining Balance",
-                fmt_brl(actual_balance),
+                "Progress",
+                f"{paid_pct:.1f}% paid",
+                delta=f"{status['remaining_months']} months left",
             )
-            if tr_adj != 0:
-                st.caption(f"TR / Index adjustment: {fmt_brl(tr_adj)}")
-            if actual_balance > 0 and rem_months > 0:
-                proj_date = datetime.now() + relativedelta(months=rem_months)
+            if status["remaining_months"] > 0:
+                proj_date = datetime.now() + relativedelta(months=status["remaining_months"])
                 st.metric("Est. Payoff", proj_date.strftime("%b %Y"))
         else:
-            st.info("No mortgage plan yet. Add one in Mortgage Tracker.")
+            st.info("No mortgage yet. Add one in Mortgage Tracker.")
         conn.close()
 
     # ── Investment summary ───────────────────────────────────────────────
@@ -671,448 +676,343 @@ elif page == "Mortgage Tracker":
     st.header("🏠 Mortgage Tracker")
 
     conn = get_db()
-    existing_plans = conn.execute(
-        "SELECT id, name, loan_amount, annual_rate, term_months, start_date FROM mortgage_plans ORDER BY created_at"
-    ).fetchall()
-    existing_ids = [p["id"] for p in existing_plans]
 
-    tab1, tab2 = st.tabs(["📋 My Plan", "➕ New Plan"])
+    status = conn.execute(
+        "SELECT id, name, current_balance, remaining_months, monthly_payment, "
+        "interest_rate, start_date, insurance, fees FROM mortgage_status ORDER BY id DESC LIMIT 1"
+    ).fetchone()
 
-    # ── Tab 1: View / track payments ──────────────────────────────────────
-    with tab1:
-        if not existing_plans:
-            st.info("No mortgage plan yet. Create one in the 'New Plan' tab.")
-        else:
-            plan_names = {f"{p['name']} ({p['id']})": p for p in existing_plans}
-            selected_name = st.selectbox(
-                "Select plan", list(plan_names.keys()), key="plan_select"
-            )
-            plan = plan_names[selected_name]
-            plan_id = plan["id"]
-
-            # Load extras
-            planned_extras = conn.execute(
-                "SELECT extra_date, amount, description FROM planned_extras WHERE plan_id = ?",
-                (plan_id,),
-            ).fetchall()
-            extras_list = [(pe["extra_date"], pe["amount"]) for pe in planned_extras]
-
-            start_dt = datetime.strptime(plan["start_date"], "%Y-%m-%d")
-            schedule = generate_schedule(
-                plan["loan_amount"],
-                plan["annual_rate"],
-                plan["term_months"],
-                start_dt,
-                extras_list,
-            )
-
-            orig_payoff_date, orig_payoff_n = find_original_payoff(schedule)
-
-            # Load payment statuses
-            paid_map = {}
-            for row in conn.execute(
-                "SELECT payment_number, is_paid, paid_date, actual_extra FROM payment_status WHERE plan_id = ?",
-                (plan_id,),
-            ):
-                paid_map[row["payment_number"]] = {
-                    "is_paid": row["is_paid"],
-                    "paid_date": row["paid_date"],
-                    "actual_extra": row["actual_extra"],
-                }
-
-            # Load checkpoints
-            checkpoints = []
-            for row in conn.execute(
-                "SELECT checkpoint_date, bank_balance FROM balance_checkpoints WHERE plan_id = ? ORDER BY checkpoint_date",
-                (plan_id,),
-            ):
-                checkpoints.append(dict(row))
-
-            actual_balance, last_paid_n, tr_adj = recalc_remaining(
-                schedule, paid_map, plan["loan_amount"], checkpoints
-            )
-            monthly_rate = plan["annual_rate"] / 100.0 / 12.0
-            sched_pmt = schedule[0]["scheduled_payment"] if schedule else 0
-
-            # Projected payoff with future planned extras
-            # For simplicity, use nper on actual_balance
-            raw_nper = npf.nper(monthly_rate, sched_pmt, -actual_balance) if actual_balance > 0 else 0
-            proj_remain_months = max(0, int(np.ceil(raw_nper)))
-            proj_payoff_date = (
-                datetime.now() + relativedelta(months=proj_remain_months)
-                if actual_balance > 0
-                else datetime.now()
-            )
-
-            # ── Summary cards ────────────────────────────────────────────
-            c1, c2, c3, c4 = st.columns(4)
-            paid_count = sum(1 for v in paid_map.values() if v["is_paid"])
-
-            orig_term = plan["term_months"]
-            actual_remaining_months = proj_remain_months if actual_balance > 0 else 0
-            actual_total_term = paid_count + actual_remaining_months
-            saved_months = orig_term - actual_total_term
-
+    if not status:
+        st.info("No mortgage yet. Set one up below.")
+        with st.form("create_mortgage"):
+            st.subheader("Initial Setup")
+            c1, c2 = st.columns(2)
             with c1:
-                st.metric(
-                    "Original Term",
-                    f"{orig_term} months",
-                    delta=f"Payoff {orig_payoff_date.strftime('%b %Y')}",
+                name = st.text_input("Name", value="My Mortgage")
+                balance_raw = st.text_input("Current Balance (R$)", placeholder="e.g. 45.290,45")
+                monthly_pmt_raw = st.text_input("Monthly Payment (R$)", placeholder="e.g. 885,35")
+                insurance_raw = st.text_input("Insurance (R$)", value="31,46")
+            with c2:
+                remaining = st.number_input("Remaining Months", min_value=1, max_value=600, value=84)
+                interest_rate = st.number_input("Interest Rate (% a.a.)", min_value=0.0, max_value=50.0, value=7.66, step=0.01)
+                fees_raw = st.text_input("Bank Fees (R$)", value="25,00")
+                start_date = st.date_input("Start Date", value=date(2026, 8, 10))
+            if st.form_submit_button("Create", use_container_width=True):
+                balance = parse_brl(balance_raw) if balance_raw else 0
+                pmt = parse_brl(monthly_pmt_raw) if monthly_pmt_raw else 0
+                ins = parse_brl(insurance_raw) if insurance_raw else 0
+                fees = parse_brl(fees_raw) if fees_raw else 0
+                if balance > 0 and pmt > 0:
+                    conn.execute(
+                        "INSERT INTO mortgage_status (name, current_balance, remaining_months, monthly_payment, "
+                        "interest_rate, start_date, insurance, fees) VALUES (?,?,?,?,?,?,?,?)",
+                        (name, balance, remaining, pmt, interest_rate, start_date.isoformat(), ins, fees),
+                    )
+                    conn.commit()
+                    st.rerun()
+        conn.close()
+        st.stop()
+
+    status_id = status["id"]
+
+    tab1, tab2, tab3 = st.tabs(["📋 Log Payment", "📈 History", "⚙️ Settings"])
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 1: Log Payment
+    # ══════════════════════════════════════════════════════════════════════
+    with tab1:
+        # ── Current snapshot ──────────────────────────────────────────
+        st.subheader("Current Snapshot (from bank)")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Balance", fmt_brl(status["current_balance"]))
+        with c2:
+            st.metric("Monthly Payment", fmt_brl(status["monthly_payment"]))
+        with c3:
+            st.metric("Remaining", f"{status['remaining_months']} months")
+        with c4:
+            initial_log = conn.execute(
+                "SELECT balance_after FROM mortgage_log WHERE status_id = ? AND is_correcao = 0 "
+                "ORDER BY log_date LIMIT 1",
+                (status_id,),
+            ).fetchone()
+            init_bal = initial_log["balance_after"] if initial_log else status["current_balance"]
+            progress = ((1 - status["current_balance"] / init_bal) * 100) if init_bal > 0 else 0
+            st.metric("Paid Off", f"{progress:.1f}%")
+
+        # ── Log a payment ─────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("Log a Payment")
+        with st.form("log_payment"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                log_date = st.date_input("Payment Date", value=date.today())
+                payment_total_raw = st.text_input(
+                    "Total Paid (R$)",
+                    value=fmt_brl(status["monthly_payment"]).replace("R$ ", ""),
+                )
+                principal_raw = st.text_input("Principal (R$)", placeholder="e.g. 539,57")
+            with c2:
+                interest_raw = st.text_input("Interest (R$)", placeholder="e.g. 289,32")
+                insurance_raw = st.text_input(
+                    "Insurance (R$)",
+                    value=fmt_brl(status["insurance"]).replace("R$ ", "") if status["insurance"] else "",
+                )
+                fees_raw = st.text_input(
+                    "Bank Fees (R$)",
+                    value=fmt_brl(status["fees"]).replace("R$ ", "") if status["fees"] else "",
+                )
+            with c3:
+                extra_raw = st.text_input("Extra Payment (R$)", value="0")
+                balance_after_raw = st.text_input(
+                    "New Balance After (R$)",
+                    placeholder="What your bank shows after payment",
+                )
+                months_after = st.number_input(
+                    "Remaining Months After",
+                    min_value=0,
+                    max_value=600,
+                    value=status["remaining_months"] - 1 if status["remaining_months"] > 1 else 0,
+                )
+            notes = st.text_input("Notes (optional)")
+
+            if st.form_submit_button("Save Payment", use_container_width=True):
+                total = parse_brl(payment_total_raw) if payment_total_raw else 0
+                principal = parse_brl(principal_raw) if principal_raw else 0
+                interest = parse_brl(interest_raw) if interest_raw else 0
+                ins = parse_brl(insurance_raw) if insurance_raw else 0
+                fees = parse_brl(fees_raw) if fees_raw else 0
+                extra = parse_brl(extra_raw) if extra_raw else 0
+                bal_after = parse_brl(balance_after_raw) if balance_after_raw else 0
+
+                if bal_after <= 0:
+                    st.error("Please enter the new balance shown by your bank.")
+                else:
+                    conn.execute(
+                        "INSERT INTO mortgage_log (status_id, log_date, payment_total, principal, "
+                        "interest, insurance, fees, extra_payment, balance_after, remaining_months_after, notes) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (status_id, log_date.isoformat(), total, principal, interest,
+                         ins, fees, extra, bal_after, months_after, notes),
+                    )
+                    conn.execute(
+                        "UPDATE mortgage_status SET current_balance = ?, remaining_months = ?, updated_at = datetime('now') WHERE id = ?",
+                        (bal_after, months_after, status_id),
+                    )
+                    conn.commit()
+                    st.success("Payment logged!")
+                    st.rerun()
+
+        # ── Log a correção monetária ───────────────────────────────────
+        st.markdown("---")
+        st.subheader("Log Balance Adjustment (Correção / TR)")
+        with st.form("log_correcao"):
+            c1, c2 = st.columns(2)
+            with c1:
+                corr_date = st.date_input("Date", value=date.today(), key="corr_date")
+                corr_balance_raw = st.text_input(
+                    "New Balance (R$)",
+                    placeholder="What your bank now shows as the balance",
+                    key="corr_balance",
                 )
             with c2:
-                if saved_months > 0:
-                    st.metric(
-                        "Actual Term (with extras)",
-                        f"{actual_total_term} months",
-                        delta=f"Saved {saved_months} months!",
+                corr_months = st.number_input(
+                    "Remaining Months (if changed)",
+                    min_value=0,
+                    max_value=600,
+                    value=status["remaining_months"],
+                    key="corr_months",
+                )
+                corr_notes = st.text_input("Notes", value="Correção monetária", key="corr_notes")
+            if st.form_submit_button("Save Adjustment", use_container_width=True):
+                cb = parse_brl(corr_balance_raw) if corr_balance_raw else 0
+                if cb > 0:
+                    conn.execute(
+                        "INSERT INTO mortgage_log (status_id, log_date, balance_after, remaining_months_after, notes, is_correcao) "
+                        "VALUES (?,?,?,?,?,1)",
+                        (status_id, corr_date.isoformat(), cb, corr_months, corr_notes),
                     )
-                elif actual_balance <= 0:
-                    st.metric("Actual Term", "PAID OFF!", delta="Congratulations!")
+                    conn.execute(
+                        "UPDATE mortgage_status SET current_balance = ?, remaining_months = ?, updated_at = datetime('now') WHERE id = ?",
+                        (cb, corr_months, status_id),
+                    )
+                    conn.commit()
+                    st.success("Adjustment logged!")
+                    st.rerun()
                 else:
-                    st.metric(
-                        "Actual Term",
-                        f"{actual_total_term} months",
-                        delta=f"{actual_remaining_months} months left",
-                    )
+                    st.error("Please enter a valid balance.")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 2: History
+    # ══════════════════════════════════════════════════════════════════════
+    with tab2:
+        logs = conn.execute(
+            "SELECT log_date, payment_total, principal, interest, insurance, fees, "
+            "extra_payment, balance_after, remaining_months_after, notes, is_correcao "
+            "FROM mortgage_log WHERE status_id = ? ORDER BY log_date",
+            (status_id,),
+        ).fetchall()
+
+        if logs:
+            # Summary stats
+            total_principal = sum(r["principal"] for r in logs)
+            total_interest = sum(r["interest"] for r in logs)
+            total_extras = sum(r["extra_payment"] for r in logs)
+            total_insurance = sum(r["insurance"] for r in logs)
+            total_fees = sum(r["fees"] for r in logs)
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Total Principal Paid", fmt_brl(total_principal))
+            with c2:
+                st.metric("Total Interest Paid", fmt_brl(total_interest))
             with c3:
-                st.metric("Remaining Balance", fmt_brl(actual_balance))
-                if tr_adj != 0:
-                    st.caption(f"TR: {fmt_brl(tr_adj)}")
+                st.metric("Total Extras", fmt_brl(total_extras))
             with c4:
-                st.metric(
-                    "Progress",
-                    f"{paid_count} / {actual_total_term} paid",
-                    delta=f"{paid_count / max(actual_total_term, 1) * 100:.0f}%",
-                )
+                st.metric("Insurance + Fees", fmt_brl(total_insurance + total_fees))
 
-            # ── Progress bar ─────────────────────────────────────────────
-            progress = paid_count / max(actual_total_term, 1) if actual_total_term > 0 else 1
-            if saved_months > 0:
-                bar_text = f"Paid {paid_count} of ~{actual_total_term} payments ({saved_months} months saved with extras)"
-            elif actual_balance <= 0:
-                bar_text = "PAID OFF! 🎉"
-            else:
-                bar_text = f"Paid {paid_count} of ~{actual_total_term} payments"
-            st.progress(min(progress, 1.0), text=bar_text)
-
-            # ── Schedule table ───────────────────────────────────────────
-            st.subheader("Payment Schedule")
-
-            # Generate remaining schedule from actual balance
-            remaining_schedule = []
-            bal = actual_balance
-            current_dt = datetime.now().replace(day=1) + relativedelta(months=1)
-            last_payment_num = paid_count
-            for i in range(1, actual_remaining_months + 1):
-                interest = bal * monthly_rate
-                principal = sched_pmt - interest
-                if principal > bal:
-                    principal = bal
-                bal -= principal
-                pn = last_payment_num + i
-                remaining_schedule.append({
-                    "payment_number": pn,
-                    "due_date": current_dt,
-                    "scheduled_payment": round(sched_pmt, 2),
-                    "scheduled_principal": round(principal, 2),
-                    "scheduled_interest": round(interest, 2),
-                    "scheduled_balance": round(max(bal, 0), 2),
-                })
-                current_dt += relativedelta(months=1)
-                if bal <= 0:
-                    break
-
-            # Paid payments history
-            paid_rows = [
-                row for row in schedule
-                if paid_map.get(row["payment_number"], {}).get("is_paid", 0)
-            ]
-            if paid_rows:
-                with st.expander(f"View {len(paid_rows)} paid payments"):
-                    for row in paid_rows:
-                        pn = row["payment_number"]
-                        pi = paid_map[pn]
-                        ex = pi.get("actual_extra", 0)
-                        st.text(
-                            f"#{pn}  {row['due_date'].strftime('%b %Y')}  |  "
-                            f"Payment: {fmt_brl(row['scheduled_payment'])}  |  "
-                            f"Principal: {fmt_brl(row['scheduled_principal'])}  |  "
-                            f"Interest: {fmt_brl(row['scheduled_interest'])}  |  "
-                            f"Balance after: {fmt_brl(row['scheduled_balance'])}"
-                            + (f"  |  Extra: {fmt_brl(ex)}" if ex else "")
-                        )
-
-            # Remaining schedule with headers
-            if remaining_schedule:
-                st.caption(
-                    f"Showing {len(remaining_schedule)} remaining payments "
-                    f"(term reduced from {orig_term} months)"
-                )
-                with st.form("payment_form"):
-                    # Header row
-                    hc1, hc2, hc3, hc4, hc5, hc6, hc7, hc8 = st.columns(
-                        [0.5, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8, 1.2]
-                    )
-                    with hc1:
-                        st.caption("**#**")
-                    with hc2:
-                        st.caption("**Due**")
-                    with hc3:
-                        st.caption("**Payment**")
-                    with hc4:
-                        st.caption("**Principal**")
-                    with hc5:
-                        st.caption("**Interest**")
-                    with hc6:
-                        st.caption("**Balance**")
-                    with hc7:
-                        st.caption("**Paid?**")
-                    with hc8:
-                        st.caption("**Extra**")
-
-                    rows_data = []
-                    for row in remaining_schedule:
-                        pn = row["payment_number"]
-                        paid_info = paid_map.get(pn, {"is_paid": 0, "paid_date": "", "actual_extra": 0})
-
-                        ca, cb, cc, cd, ce, cf, cg, ch = st.columns(
-                            [0.5, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8, 1.2]
-                        )
-                        with ca:
-                            st.caption(f"#{pn}")
-                        with cb:
-                            st.caption(row["due_date"].strftime("%b %Y"))
-                        with cc:
-                            st.caption(fmt_brl(row["scheduled_payment"]))
-                        with cd:
-                            st.caption(fmt_brl(row["scheduled_principal"]))
-                        with ce:
-                            st.caption(fmt_brl(row["scheduled_interest"]))
-                        with cf:
-                            st.caption(fmt_brl(row["scheduled_balance"]))
-                        with cg:
-                            is_checked = st.checkbox(
-                                "Paid",
-                                value=bool(paid_info["is_paid"]),
-                                key=f"paid_{plan_id}_{pn}",
-                            )
-                        with ch:
-                            extra_val = st.text_input(
-                                "Extra",
-                                value=str(paid_info["actual_extra"]) if paid_info["actual_extra"] else "",
-                                key=f"extra_{plan_id}_{pn}",
-                                placeholder="0",
-                            )
-                        rows_data.append((pn, is_checked, extra_val))
-
-                    if st.form_submit_button("💾 Save Payment Updates", use_container_width=True):
-                        for pn, is_checked, extra_val in rows_data:
-                            try:
-                                ex = float(extra_val) if extra_val else 0.0
-                            except ValueError:
-                                ex = 0.0
-                            conn.execute(
-                                "INSERT OR REPLACE INTO payment_status (plan_id, payment_number, is_paid, paid_date, actual_extra) "
-                                "VALUES (?, ?, ?, ?, ?)",
-                                (
-                                    plan_id,
-                                    pn,
-                                    1 if is_checked else 0,
-                                    datetime.now().strftime("%Y-%m-%d") if is_checked else None,
-                                    ex,
-                                ),
-                            )
-                        conn.commit()
-                        st.success("Saved!")
-                        st.rerun()
-            elif actual_balance <= 0:
-                st.success("All payments complete! 🎉")
-            else:
-                st.info("No remaining payments to show.")
-
-            # ── Balance over time chart ─────────────────────────────────
-            st.subheader("Balance Over Time")
-            chart_dates = [r["due_date"] for r in schedule]
-            chart_scheduled = [r["scheduled_balance"] for r in schedule]
-
-            # Calculate actual balance trajectory based on paid status + checkpoints
-            running_balance = plan["loan_amount"]
-            chart_actual = []
-            cp_dates = {c["checkpoint_date"]: c["bank_balance"] for c in checkpoints}
-            for row in schedule:
-                pn = row["payment_number"]
-                if row["date_key"] in cp_dates:
-                    running_balance = cp_dates[row["date_key"]]
-                pi = paid_map.get(pn, {"is_paid": 0, "actual_extra": 0})
-                if pi["is_paid"]:
-                    running_balance -= row["scheduled_principal"] + pi["actual_extra"]
-                chart_actual.append(max(running_balance, 0))
+            # Chart: balance over time
+            chart_balances = []
+            chart_dates = []
+            chart_labels = []
+            for r in logs:
+                chart_dates.append(r["log_date"])
+                chart_balances.append(r["balance_after"])
+                if r["is_correcao"]:
+                    chart_labels.append("Correção")
+                elif r["extra_payment"] and r["extra_payment"] > 0:
+                    chart_labels.append("Payment + Extra")
+                else:
+                    chart_labels.append("Payment")
 
             fig = go.Figure()
             fig.add_trace(
                 go.Scatter(
                     x=chart_dates,
-                    y=chart_scheduled,
-                    name="Original Plan",
-                    line=dict(color="gray", dash="dash"),
-                )
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=chart_dates,
-                    y=chart_actual,
-                    name="Actual",
+                    y=chart_balances,
+                    name="Balance",
                     line=dict(color="green", width=3),
-                    fill="tozeroy",
-                    fillcolor="rgba(0,128,0,0.1)",
+                    mode="lines+markers",
+                    text=chart_labels,
                 )
             )
             fig.update_layout(
                 height=350,
                 margin=dict(l=20, r=20, t=20, b=20),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 hovermode="x unified",
             )
             fig.update_yaxes(title="Balance (R$)", tickprefix="R$")
             st.plotly_chart(fig, use_container_width=True)
 
-            # ── Balance checkpoint (TR / index adjustment) ────────────────
-            st.subheader("Update Balance from Bank")
-            st.caption(
-                "If your bank adjusts your balance (e.g. TR / Taxa Referencial), "
-                "enter the new balance your bank shows so projections stay accurate."
+            # History table
+            st.subheader("Payment History")
+            history_data = []
+            for r in logs:
+                if r["is_correcao"]:
+                    label = "⚡ Correção"
+                else:
+                    label = "💰 Payment"
+                history_data.append({
+                    "Date": r["log_date"],
+                    "Type": label,
+                    "Total": fmt_brl(r["payment_total"]) if r["payment_total"] else "-",
+                    "Principal": fmt_brl(r["principal"]) if r["principal"] else "-",
+                    "Interest": fmt_brl(r["interest"]) if r["interest"] else "-",
+                    "Extra": fmt_brl(r["extra_payment"]) if r["extra_payment"] else "-",
+                    "Balance After": fmt_brl(r["balance_after"]),
+                    "Months Left": r["remaining_months_after"] or "-",
+                    "Notes": r["notes"] or "",
+                })
+            st.dataframe(
+                pd.DataFrame(history_data),
+                use_container_width=True,
+                hide_index=True,
             )
-            with st.form("checkpoint_form"):
-                c1, c2, c3 = st.columns([1, 1, 1])
-                with c1:
-                    cp_date = st.date_input("As of date", value=date.today(), key="cp_date")
-                with c2:
-                    cp_balance_raw = st.text_input(
-                        "Bank balance (R$)", placeholder="e.g. 44.500,00", key="cp_balance"
-                    )
-                with c3:
-                    cp_notes = st.text_input("Notes (optional)", placeholder="e.g. TR adjustment", key="cp_notes")
-                if st.form_submit_button("💾 Save Balance Checkpoint", use_container_width=True):
-                    cp_balance = parse_brl(cp_balance_raw) if cp_balance_raw else 0
-                    if cp_balance > 0:
-                        conn.execute(
-                            "INSERT INTO balance_checkpoints (plan_id, checkpoint_date, bank_balance, notes) "
-                            "VALUES (?, ?, ?, ?)",
-                            (plan_id, cp_date.isoformat(), cp_balance, cp_notes),
-                        )
-                        conn.commit()
-                        st.success("Balance updated!")
-                        st.rerun()
-                    else:
-                        st.error("Please enter a valid balance.")
 
-            # Show checkpoint history
-            cp_history = conn.execute(
-                "SELECT checkpoint_date, bank_balance, notes FROM balance_checkpoints WHERE plan_id = ? ORDER BY checkpoint_date DESC",
-                (plan_id,),
-            ).fetchall()
-            if cp_history:
-                with st.expander("View Balance History"):
-                    for cp in cp_history:
-                        st.text(
-                            f"{cp['checkpoint_date']} — {fmt_brl(cp['bank_balance'])}"
-                            + (f" ({cp['notes']})" if cp["notes"] else "")
-                        )
-
-            # ── Delete plan ──────────────────────────────────────────────
-            with st.expander("Delete Plan"):
-                if st.button("🗑️ Delete This Plan", type="secondary"):
-                    conn.execute("DELETE FROM balance_checkpoints WHERE plan_id = ?", (plan_id,))
-                    conn.execute("DELETE FROM payment_status WHERE plan_id = ?", (plan_id,))
-                    conn.execute("DELETE FROM planned_extras WHERE plan_id = ?", (plan_id,))
-                    conn.execute("DELETE FROM mortgage_plans WHERE id = ?", (plan_id,))
+            # Delete entries
+            with st.expander("Delete Entries"):
+                to_delete = st.multiselect(
+                    "Select entries to delete",
+                    [f"ID {r['id']}: {r['log_date']}" for r in conn.execute(
+                        "SELECT id, log_date FROM mortgage_log WHERE status_id = ? ORDER BY log_date",
+                        (status_id,),
+                    ).fetchall()],
+                    key="mortgage_delete",
+                )
+                if to_delete and st.button("🗑️ Delete Selected", key="del_mortgage"):
+                    for item in to_delete:
+                        entry_id = int(item.split(":")[0].replace("ID ", ""))
+                        conn.execute("DELETE FROM mortgage_log WHERE id = ?", (entry_id,))
                     conn.commit()
-                    st.success("Deleted.")
                     st.rerun()
+        else:
+            st.info("No payments logged yet.")
 
-    # ── Tab 2: Create new plan ────────────────────────────────────────────
-    with tab2:
-        st.subheader("Create New Mortgage Plan")
-        with st.form("new_plan_form"):
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 3: Settings
+    # ══════════════════════════════════════════════════════════════════════
+    with tab3:
+        st.subheader("Update Mortgage Details")
+        with st.form("update_mortgage"):
             c1, c2 = st.columns(2)
             with c1:
-                name = st.text_input("Plan Name", value="My Mortgage")
-                loan_amount_raw = st.text_input(
-                    "Loan Amount", value="45.290,45", placeholder="e.g. 45.290,45"
+                new_name = st.text_input("Name", value=status["name"])
+                new_balance_raw = st.text_input(
+                    "Current Balance (R$)",
+                    value=fmt_brl(status["current_balance"]).replace("R$ ", ""),
                 )
-                annual_rate = st.number_input(
-                    "Annual Interest Rate (%)",
+                new_pmt_raw = st.text_input(
+                    "Monthly Payment (R$)",
+                    value=fmt_brl(status["monthly_payment"]).replace("R$ ", ""),
+                )
+                new_insurance_raw = st.text_input(
+                    "Insurance (R$)",
+                    value=fmt_brl(status["insurance"]).replace("R$ ", "") if status["insurance"] else "",
+                )
+            with c2:
+                new_remaining = st.number_input(
+                    "Remaining Months",
+                    min_value=1,
+                    max_value=600,
+                    value=status["remaining_months"],
+                )
+                new_rate = st.number_input(
+                    "Interest Rate (% a.a.)",
                     min_value=0.0,
                     max_value=50.0,
-                    value=7.66,
+                    value=float(status["interest_rate"]),
                     step=0.01,
                 )
-            with c2:
-                term_months = st.number_input(
-                    "Term (months)", min_value=1, max_value=600, value=84
+                new_fees_raw = st.text_input(
+                    "Bank Fees (R$)",
+                    value=fmt_brl(status["fees"]).replace("R$ ", "") if status["fees"] else "",
                 )
-                start_date = st.date_input("Start Date", value=date(2026, 8, 1))
-
-            loan_amount = parse_brl(loan_amount_raw) if loan_amount_raw else 0
-
-            st.markdown("---")
-            st.caption("Planned Extra Payments (optional)")
-            c1, c2 = st.columns(2)
-            with c1:
-                extra_monthly = st.text_input(
-                    "Extra Monthly Payment", value="5.200,00", placeholder="e.g. 5.200,00"
+                new_start = st.date_input(
+                    "Start Date",
+                    value=datetime.strptime(status["start_date"], "%Y-%m-%d"),
                 )
-                extra_monthly_start = st.date_input(
-                    "Extra Monthly Starts", value=date(2026, 8, 1)
-                )
-            with c2:
-                extra_onetime = st.text_input(
-                    "One-Time Extra Payment", value="17.000,00", placeholder="e.g. 17.000,00"
-                )
-                extra_onetime_date = st.date_input(
-                    "One-Time Extra Date", value=date(2026, 12, 1)
-                )
-
-            submitted = st.form_submit_button("Create Plan", use_container_width=True)
-
-        if submitted:
-            if loan_amount <= 0:
-                st.error("Please enter a valid loan amount.")
-            else:
+            if st.form_submit_button("Update", use_container_width=True):
+                bal = parse_brl(new_balance_raw) if new_balance_raw else status["current_balance"]
+                pmt = parse_brl(new_pmt_raw) if new_pmt_raw else status["monthly_payment"]
+                ins = parse_brl(new_insurance_raw) if new_insurance_raw else 0
+                fees = parse_brl(new_fees_raw) if new_fees_raw else 0
                 conn.execute(
-                    "INSERT INTO mortgage_plans (name, loan_amount, annual_rate, term_months, start_date) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (name, loan_amount, annual_rate, term_months, start_date.isoformat()),
+                    "UPDATE mortgage_status SET name=?, current_balance=?, remaining_months=?, "
+                    "monthly_payment=?, interest_rate=?, start_date=?, insurance=?, fees=?, updated_at=datetime('now') "
+                    "WHERE id=?",
+                    (new_name, bal, new_remaining, pmt, new_rate, new_start.isoformat(), ins, fees, status_id),
                 )
-                plan_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-                # Save planned extras
-                em = parse_brl(extra_monthly) if extra_monthly else 0
-                eo = parse_brl(extra_onetime) if extra_onetime else 0
-
-                if em > 0:
-                    current = extra_monthly_start
-                    end_date = start_date + relativedelta(months=term_months - 1)
-                    while current <= end_date:
-                        conn.execute(
-                            "INSERT INTO planned_extras (plan_id, extra_date, amount, description) VALUES (?, ?, ?, ?)",
-                            (plan_id, current.isoformat(), em, "Monthly extra"),
-                        )
-                        current += relativedelta(months=1)
-
-                if eo > 0:
-                    conn.execute(
-                        "INSERT INTO planned_extras (plan_id, extra_date, amount, description) VALUES (?, ?, ?, ?)",
-                        (
-                            plan_id,
-                            extra_onetime_date.isoformat(),
-                            eo,
-                            "One-time extra",
-                        ),
-                    )
-
                 conn.commit()
-                st.success(f"Plan '{name}' created!")
+                st.success("Updated!")
+                st.rerun()
+
+        # Delete
+        with st.expander("Delete Mortgage"):
+            if st.button("🗑️ Delete All Mortgage Data", type="secondary"):
+                conn.execute("DELETE FROM mortgage_log WHERE status_id = ?", (status_id,))
+                conn.execute("DELETE FROM mortgage_status WHERE id = ?", (status_id,))
+                conn.commit()
+                st.success("Deleted.")
                 st.rerun()
 
     conn.close()
