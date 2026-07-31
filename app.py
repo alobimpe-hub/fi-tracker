@@ -797,63 +797,138 @@ elif page == "Mortgage Tracker":
 
             # ── Schedule table ───────────────────────────────────────────
             st.subheader("Payment Schedule")
-            with st.form("payment_form"):
-                rows_data = []
-                for row in schedule:
-                    pn = row["payment_number"]
-                    paid_info = paid_map.get(pn, {"is_paid": 0, "paid_date": "", "actual_extra": 0})
 
-                    col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h = st.columns(
+            # Generate remaining schedule from actual balance
+            remaining_schedule = []
+            bal = actual_balance
+            current_dt = datetime.now().replace(day=1) + relativedelta(months=1)
+            last_payment_num = paid_count
+            for i in range(1, actual_remaining_months + 1):
+                interest = bal * monthly_rate
+                principal = sched_pmt - interest
+                if principal > bal:
+                    principal = bal
+                bal -= principal
+                pn = last_payment_num + i
+                remaining_schedule.append({
+                    "payment_number": pn,
+                    "due_date": current_dt,
+                    "scheduled_payment": round(sched_pmt, 2),
+                    "scheduled_principal": round(principal, 2),
+                    "scheduled_interest": round(interest, 2),
+                    "scheduled_balance": round(max(bal, 0), 2),
+                })
+                current_dt += relativedelta(months=1)
+                if bal <= 0:
+                    break
+
+            # Paid payments history
+            paid_rows = [
+                row for row in schedule
+                if paid_map.get(row["payment_number"], {}).get("is_paid", 0)
+            ]
+            if paid_rows:
+                with st.expander(f"View {len(paid_rows)} paid payments"):
+                    for row in paid_rows:
+                        pn = row["payment_number"]
+                        pi = paid_map[pn]
+                        ex = pi.get("actual_extra", 0)
+                        st.text(
+                            f"#{pn}  {row['due_date'].strftime('%b %Y')}  |  "
+                            f"Payment: {fmt_brl(row['scheduled_payment'])}  |  "
+                            f"Principal: {fmt_brl(row['scheduled_principal'])}  |  "
+                            f"Interest: {fmt_brl(row['scheduled_interest'])}  |  "
+                            f"Balance after: {fmt_brl(row['scheduled_balance'])}"
+                            + (f"  |  Extra: {fmt_brl(ex)}" if ex else "")
+                        )
+
+            # Remaining schedule with headers
+            if remaining_schedule:
+                st.caption(
+                    f"Showing {len(remaining_schedule)} remaining payments "
+                    f"(term reduced from {orig_term} months)"
+                )
+                with st.form("payment_form"):
+                    # Header row
+                    hc1, hc2, hc3, hc4, hc5, hc6, hc7, hc8 = st.columns(
                         [0.5, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8, 1.2]
                     )
+                    with hc1:
+                        st.caption("**#**")
+                    with hc2:
+                        st.caption("**Due**")
+                    with hc3:
+                        st.caption("**Payment**")
+                    with hc4:
+                        st.caption("**Principal**")
+                    with hc5:
+                        st.caption("**Interest**")
+                    with hc6:
+                        st.caption("**Balance**")
+                    with hc7:
+                        st.caption("**Paid?**")
+                    with hc8:
+                        st.caption("**Extra**")
 
-                    with col_a:
-                        st.caption(f"#{pn}")
-                    with col_b:
-                        st.caption(row["due_date"].strftime("%b %Y"))
-                    with col_c:
-                        st.caption(fmt_brl(row["scheduled_payment"]))
-                    with col_d:
-                        st.caption(fmt_brl(row["scheduled_principal"]))
-                    with col_e:
-                        st.caption(fmt_brl(row["scheduled_interest"]))
-                    with col_f:
-                        st.caption(fmt_brl(row["scheduled_balance"]))
-                    with col_g:
-                        is_checked = st.checkbox(
-                            "Paid",
-                            value=bool(paid_info["is_paid"]),
-                            key=f"paid_{plan_id}_{pn}",
-                        )
-                    with col_h:
-                        extra_val = st.text_input(
-                            "Extra",
-                            value=str(paid_info["actual_extra"]) if paid_info["actual_extra"] else "",
-                            key=f"extra_{plan_id}_{pn}",
-                            placeholder="0",
-                        )
-                    rows_data.append((pn, is_checked, extra_val))
+                    rows_data = []
+                    for row in remaining_schedule:
+                        pn = row["payment_number"]
+                        paid_info = paid_map.get(pn, {"is_paid": 0, "paid_date": "", "actual_extra": 0})
 
-                if st.form_submit_button("💾 Save Payment Updates", use_container_width=True):
-                    for pn, is_checked, extra_val in rows_data:
-                        try:
-                            ex = float(extra_val) if extra_val else 0.0
-                        except ValueError:
-                            ex = 0.0
-                        conn.execute(
-                            "INSERT OR REPLACE INTO payment_status (plan_id, payment_number, is_paid, paid_date, actual_extra) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (
-                                plan_id,
-                                pn,
-                                1 if is_checked else 0,
-                                datetime.now().strftime("%Y-%m-%d") if is_checked else None,
-                                ex,
-                            ),
+                        ca, cb, cc, cd, ce, cf, cg, ch = st.columns(
+                            [0.5, 1.2, 1.2, 1.2, 1.2, 1.2, 0.8, 1.2]
                         )
-                    conn.commit()
-                    st.success("Saved!")
-                    st.rerun()
+                        with ca:
+                            st.caption(f"#{pn}")
+                        with cb:
+                            st.caption(row["due_date"].strftime("%b %Y"))
+                        with cc:
+                            st.caption(fmt_brl(row["scheduled_payment"]))
+                        with cd:
+                            st.caption(fmt_brl(row["scheduled_principal"]))
+                        with ce:
+                            st.caption(fmt_brl(row["scheduled_interest"]))
+                        with cf:
+                            st.caption(fmt_brl(row["scheduled_balance"]))
+                        with cg:
+                            is_checked = st.checkbox(
+                                "Paid",
+                                value=bool(paid_info["is_paid"]),
+                                key=f"paid_{plan_id}_{pn}",
+                            )
+                        with ch:
+                            extra_val = st.text_input(
+                                "Extra",
+                                value=str(paid_info["actual_extra"]) if paid_info["actual_extra"] else "",
+                                key=f"extra_{plan_id}_{pn}",
+                                placeholder="0",
+                            )
+                        rows_data.append((pn, is_checked, extra_val))
+
+                    if st.form_submit_button("💾 Save Payment Updates", use_container_width=True):
+                        for pn, is_checked, extra_val in rows_data:
+                            try:
+                                ex = float(extra_val) if extra_val else 0.0
+                            except ValueError:
+                                ex = 0.0
+                            conn.execute(
+                                "INSERT OR REPLACE INTO payment_status (plan_id, payment_number, is_paid, paid_date, actual_extra) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (
+                                    plan_id,
+                                    pn,
+                                    1 if is_checked else 0,
+                                    datetime.now().strftime("%Y-%m-%d") if is_checked else None,
+                                    ex,
+                                ),
+                            )
+                        conn.commit()
+                        st.success("Saved!")
+                        st.rerun()
+            elif actual_balance <= 0:
+                st.success("All payments complete! 🎉")
+            else:
+                st.info("No remaining payments to show.")
 
             # ── Balance over time chart ─────────────────────────────────
             st.subheader("Balance Over Time")
