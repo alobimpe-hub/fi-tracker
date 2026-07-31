@@ -18,6 +18,33 @@ st.set_page_config(
     initial_sidebar_state="auto",
 )
 
+# ── Authentication ───────────────────────────────────────────────────────────
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    with st.form("login_form"):
+        st.title("💸 FI Tracker")
+        st.caption("Enter your password to unlock")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Unlock")
+
+        if submitted:
+            expected = st.secrets.get("APP_PASSWORD", "demo1234")
+            if password == expected:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Wrong password")
+    return False
+
+
+if not check_password():
+    st.stop()
+
 # ── Database ─────────────────────────────────────────────────────────────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "finance_tracker.db")
 
@@ -298,6 +325,10 @@ page = st.sidebar.radio(
     "Menu",
     ["Dashboard", "FI Tracker", "Mortgage Tracker", "Investment Tracker", "BCB Indicators"],
 )
+
+if st.sidebar.button("🔒 Lock App"):
+    st.session_state.authenticated = False
+    st.rerun()
 
 # ── Initialize DB ────────────────────────────────────────────────────────────
 init_db()
