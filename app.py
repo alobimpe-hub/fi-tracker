@@ -745,23 +745,43 @@ elif page == "Mortgage Tracker":
             # ── Summary cards ────────────────────────────────────────────
             c1, c2, c3, c4 = st.columns(4)
             paid_count = sum(1 for v in paid_map.values() if v["is_paid"])
+
+            orig_term_value = plan["term_months"]
+            saved_months = orig_term_value - len(schedule)
+
             with c1:
-                st.metric("Payments Made", f"{paid_count} / {len(schedule)}")
+                st.metric(
+                    "Original Term",
+                    f"{orig_term_value} months",
+                    delta=f"Payoff {orig_payoff_date.strftime('%b %Y')}",
+                )
             with c2:
-                st.metric("Original Payoff", orig_payoff_date.strftime("%b %Y"))
+                if saved_months > 0:
+                    st.metric(
+                        "With Extra Payments",
+                        f"{len(schedule)} months",
+                        delta=f"Saved {saved_months} months!",
+                    )
+                else:
+                    st.metric("With Extra Payments", f"{len(schedule)} months")
             with c3:
                 st.metric("Remaining Balance", fmt_brl(actual_balance))
                 if tr_adj != 0:
-                    st.caption(f"TR / Index adjustment: {fmt_brl(tr_adj)}")
+                    st.caption(f"TR: {fmt_brl(tr_adj)}")
             with c4:
-                if actual_balance > 0:
-                    st.metric("Est. Payoff (actual)", proj_payoff_date.strftime("%b %Y"))
-                else:
-                    st.metric("Est. Payoff (actual)", "PAID OFF!")
+                st.metric(
+                    "Progress",
+                    f"{paid_count} / {len(schedule)} paid",
+                    delta=f"{paid_count / max(len(schedule), 1) * 100:.0f}%",
+                )
 
             # ── Progress bar ─────────────────────────────────────────────
             progress = paid_count / len(schedule) if schedule else 0
-            st.progress(progress, text=f"Paid {paid_count} of {len(schedule)} payments")
+            if saved_months > 0:
+                bar_text = f"Paid {paid_count} of {len(schedule)} payments ({saved_months} months saved with extras)"
+            else:
+                bar_text = f"Paid {paid_count} of {len(schedule)} payments"
+            st.progress(progress, text=bar_text)
 
             # ── Schedule table ───────────────────────────────────────────
             st.subheader("Payment Schedule")
