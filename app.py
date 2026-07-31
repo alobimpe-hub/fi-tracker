@@ -452,11 +452,12 @@ if page == "Dashboard":
 
     # ── FI progress ─────────────────────────────────────────────────────
     st.markdown("---")
-    fi_row = get_db().execute(
+    fi_conn = get_db()
+    fi_row = fi_conn.execute(
         "SELECT monthly_expenses, withdrawal_rate FROM fi_settings WHERE id = 1"
     ).fetchone()
     if fi_row and fi_row["monthly_expenses"] > 0:
-        inv_bal = get_db().execute(
+        inv_bal = fi_conn.execute(
             "SELECT total_balance FROM investment_log ORDER BY entry_date DESC LIMIT 1"
         ).fetchone()
         portfolio = inv_bal["total_balance"] if inv_bal else 0
@@ -477,6 +478,7 @@ if page == "Dashboard":
                 f"{(monthly_fi_income / fi_row['monthly_expenses'] * 100):.1f}%",
             )
         st.progress(min(fi_pct / 100, 1.0))
+    fi_conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FI TRACKER
@@ -746,24 +748,32 @@ elif page == "Mortgage Tracker":
             c1, c2, c3, c4 = st.columns(4)
             paid_count = sum(1 for v in paid_map.values() if v["is_paid"])
 
-            orig_term_value = plan["term_months"]
-            saved_months = orig_term_value - len(schedule)
+            orig_term = plan["term_months"]
+            actual_remaining_months = proj_remain_months if actual_balance > 0 else 0
+            actual_total_term = paid_count + actual_remaining_months
+            saved_months = orig_term - actual_total_term
 
             with c1:
                 st.metric(
                     "Original Term",
-                    f"{orig_term_value} months",
+                    f"{orig_term} months",
                     delta=f"Payoff {orig_payoff_date.strftime('%b %Y')}",
                 )
             with c2:
                 if saved_months > 0:
                     st.metric(
-                        "With Extra Payments",
-                        f"{len(schedule)} months",
+                        "Actual Term (with extras)",
+                        f"{actual_total_term} months",
                         delta=f"Saved {saved_months} months!",
                     )
+                elif actual_balance <= 0:
+                    st.metric("Actual Term", "PAID OFF!", delta="Congratulations!")
                 else:
-                    st.metric("With Extra Payments", f"{len(schedule)} months")
+                    st.metric(
+                        "Actual Term",
+                        f"{actual_total_term} months",
+                        delta=f"{actual_remaining_months} months left",
+                    )
             with c3:
                 st.metric("Remaining Balance", fmt_brl(actual_balance))
                 if tr_adj != 0:
@@ -771,17 +781,19 @@ elif page == "Mortgage Tracker":
             with c4:
                 st.metric(
                     "Progress",
-                    f"{paid_count} / {len(schedule)} paid",
-                    delta=f"{paid_count / max(len(schedule), 1) * 100:.0f}%",
+                    f"{paid_count} / {actual_total_term} paid",
+                    delta=f"{paid_count / max(actual_total_term, 1) * 100:.0f}%",
                 )
 
             # ── Progress bar ─────────────────────────────────────────────
-            progress = paid_count / len(schedule) if schedule else 0
+            progress = paid_count / max(actual_total_term, 1) if actual_total_term > 0 else 1
             if saved_months > 0:
-                bar_text = f"Paid {paid_count} of {len(schedule)} payments ({saved_months} months saved with extras)"
+                bar_text = f"Paid {paid_count} of ~{actual_total_term} payments ({saved_months} months saved with extras)"
+            elif actual_balance <= 0:
+                bar_text = "PAID OFF! 🎉"
             else:
-                bar_text = f"Paid {paid_count} of {len(schedule)} payments"
-            st.progress(progress, text=bar_text)
+                bar_text = f"Paid {paid_count} of ~{actual_total_term} payments"
+            st.progress(min(progress, 1.0), text=bar_text)
 
             # ── Schedule table ───────────────────────────────────────────
             st.subheader("Payment Schedule")
