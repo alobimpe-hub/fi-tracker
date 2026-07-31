@@ -1231,9 +1231,9 @@ elif page == "Investment Tracker":
                 )
             with c5:
                 st.metric(
-                    "IPCA (month / 12m)",
-                    f"{latest_ipca:.2f}%",
-                    delta=f"{ipca_12m:.1f}% 12m" if ipca_12m else "",
+                    "Total Inflation (IPCA)",
+                    f"{(cum_inflation - 1) * 100:.2f}%",
+                    delta=f"Since {first_date.strftime('%b %Y')}",
                 )
 
             # ── Data table ──────────────────────────────────────────────
