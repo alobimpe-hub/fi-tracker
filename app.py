@@ -500,9 +500,10 @@ elif page == "FI Tracker":
 
     # Get latest investment balance
     latest_inv = conn.execute(
-        "SELECT total_balance FROM investment_log ORDER BY entry_date DESC LIMIT 1"
+        "SELECT total_balance, entry_date FROM investment_log ORDER BY entry_date DESC LIMIT 1"
     ).fetchone()
     current_balance = latest_inv["total_balance"] if latest_inv else 0
+    last_inv_date = latest_inv["entry_date"] if latest_inv else None
 
     # ── Settings form ──────────────────────────────────────────────────
     with st.form("fi_settings_form"):
@@ -549,7 +550,11 @@ elif page == "FI Tracker":
         with c1:
             st.metric("Your FI Number", fmt_brl(fi_number))
         with c2:
-            st.metric("Current Portfolio", fmt_brl(current_balance))
+            st.metric(
+                "Current Portfolio",
+                fmt_brl(current_balance),
+                delta=f"Last entry: {last_inv_date}" if last_inv_date else "",
+            )
         with c3:
             st.metric(
                 "Progress to FI",
