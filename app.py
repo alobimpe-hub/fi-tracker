@@ -463,7 +463,7 @@ if page == "Dashboard":
     ).fetchone()
     if fi_row and fi_row["monthly_expenses"] > 0:
         inv_bal = fi_conn.execute(
-            "SELECT total_balance FROM investment_log ORDER BY entry_date DESC LIMIT 1"
+            "SELECT total_balance FROM investment_log ORDER BY id DESC LIMIT 1"
         ).fetchone()
         portfolio = inv_bal["total_balance"] if inv_bal else 0
         fi_number = fi_row["monthly_expenses"] * 12 * (100 / fi_row["withdrawal_rate"])
@@ -500,7 +500,7 @@ elif page == "FI Tracker":
 
     # Get latest investment balance
     latest_inv = conn.execute(
-        "SELECT total_balance, entry_date FROM investment_log ORDER BY entry_date DESC LIMIT 1"
+        "SELECT total_balance, entry_date FROM investment_log ORDER BY id DESC LIMIT 1"
     ).fetchone()
     current_balance = latest_inv["total_balance"] if latest_inv else 0
     last_inv_date = latest_inv["entry_date"] if latest_inv else None
@@ -1188,14 +1188,6 @@ elif page == "Investment Tracker":
             years = max((last_date - first_date).days / 365.25, 0.01)
 
             # Inflation metrics
-            real_balance = df["Real Balance"].iloc[-1] if "Real Balance" in df.columns else latest_balance
-            real_growth = real_balance - df["Cumulative Contributions"].iloc[0]
-            real_return_pct = (
-                (real_growth / df["Cumulative Contributions"].iloc[0] * 100)
-                if df["Cumulative Contributions"].iloc[0] > 0
-                else 0
-            )
-
             latest_ipca = 0
             ipca_12m = 0
             if not ipca_df.empty:
@@ -1203,6 +1195,10 @@ elif page == "Investment Tracker":
                 ipca_last_12 = ipca_df.tail(12)
                 if len(ipca_last_12) > 0:
                     ipca_12m = ((1 + ipca_last_12["valor"] / 100).prod() - 1) * 100
+
+            # Simple real return: nominal return% minus 12-month inflation
+            real_return_pct = return_pct - ipca_12m
+            real_growth = total_growth - (total_contrib * ipca_12m / 100)
 
             c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
@@ -1217,9 +1213,9 @@ elif page == "Investment Tracker":
                 )
             with c4:
                 st.metric(
-                    f"Real Return (vs IPCA)",
+                    "Real Return (vs IPCA)",
                     fmt_brl(real_growth),
-                    delta=f"{real_return_pct:.1f}% real",
+                    delta=f"{real_return_pct:+.1f}% real",
                 )
             with c5:
                 st.metric(
@@ -1230,11 +1226,15 @@ elif page == "Investment Tracker":
 
             # ── Data table ──────────────────────────────────────────────
             st.subheader("History")
-            display_df = df[["Date", "Contributed", "Total Balance", "Growth", "Notes"]].copy()
+            df["Change"] = df["Total Balance"].diff().fillna(0)
+            display_df = df[["Date", "Contributed", "Change", "Total Balance", "Growth", "Notes"]].copy()
+            display_df.columns = ["Date", "Contributed", "Change", "Total Balance", "Cumulative Growth", "Notes"]
             display_df["Contributed"] = display_df["Contributed"].apply(fmt_brl)
+            display_df["Change"] = display_df["Change"].apply(fmt_brl)
             display_df["Total Balance"] = display_df["Total Balance"].apply(fmt_brl)
-            display_df["Growth"] = display_df["Growth"].apply(fmt_brl)
+            display_df["Cumulative Growth"] = display_df["Cumulative Growth"].apply(fmt_brl)
             st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.caption("*Cumulative Growth* = balance minus all contributions. *Change* = increase since last entry.")
 
             # Delete entries
             with st.expander("Delete Entries"):
