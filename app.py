@@ -748,27 +748,31 @@ elif page == "Mortgage Tracker":
                     max_value=600,
                     value=status["remaining_months"] - 1 if status["remaining_months"] > 1 else 0,
                 )
+                balance_after_raw = st.text_input(
+                    "Balance After (R$)",
+                    placeholder="What your bank shows after payment",
+                )
                 notes = st.text_input("Notes (optional)")
 
             if st.form_submit_button("Save Payment", use_container_width=True):
                 principal = parse_brl(principal_raw) if principal_raw else 0
+                bal_after = parse_brl(balance_after_raw) if balance_after_raw else 0
                 if principal <= 0:
                     st.error("Please enter the principal amount.")
+                elif bal_after <= 0:
+                    st.error("Please enter the balance after payment.")
                 else:
-                    new_balance = status["current_balance"] - principal
-                    if new_balance < 0:
-                        new_balance = 0
                     conn.execute(
                         "INSERT INTO mortgage_log (status_id, log_date, principal, balance_after, "
                         "remaining_months_after, notes, is_correcao) "
                         "VALUES (?,?,?,?,?,?,0)",
-                        (status_id, log_date.isoformat(), principal, new_balance, months_after,
+                        (status_id, log_date.isoformat(), principal, bal_after, months_after,
                          f"{payment_type}: {notes}" if notes else payment_type),
                     )
                     conn.execute(
                         "UPDATE mortgage_status SET current_balance = ?, remaining_months = ?, "
                         "updated_at = datetime('now') WHERE id = ?",
-                        (new_balance, months_after, status_id),
+                        (bal_after, months_after, status_id),
                     )
                     conn.commit()
                     st.success("Payment logged!")
