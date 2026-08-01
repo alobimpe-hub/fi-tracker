@@ -696,22 +696,18 @@ elif page == "Mortgage Tracker":
                 name = st.text_input("Name", value="My Mortgage")
                 balance_raw = st.text_input("Current Balance (R$)", placeholder="e.g. 45.290,45")
                 monthly_pmt_raw = st.text_input("Monthly Payment (R$)", placeholder="e.g. 885,35")
-                insurance_raw = st.text_input("Insurance (R$)", value="31,46")
             with c2:
                 remaining = st.number_input("Remaining Months", min_value=1, max_value=600, value=84)
                 interest_rate = st.number_input("Interest Rate (% a.a.)", min_value=0.0, max_value=50.0, value=7.66, step=0.01)
-                fees_raw = st.text_input("Bank Fees (R$)", value="25,00")
                 start_date = st.date_input("Start Date", value=date(2026, 8, 10))
             if st.form_submit_button("Create", use_container_width=True):
                 balance = parse_brl(balance_raw) if balance_raw else 0
                 pmt = parse_brl(monthly_pmt_raw) if monthly_pmt_raw else 0
-                ins = parse_brl(insurance_raw) if insurance_raw else 0
-                fees = parse_brl(fees_raw) if fees_raw else 0
                 if balance > 0 and pmt > 0:
                     conn.execute(
                         "INSERT INTO mortgage_status (name, current_balance, remaining_months, monthly_payment, "
-                        "interest_rate, start_date, insurance, fees) VALUES (?,?,?,?,?,?,?,?)",
-                        (name, balance, remaining, pmt, interest_rate, start_date.isoformat(), ins, fees),
+                        "interest_rate, start_date) VALUES (?,?,?,?,?,?)",
+                        (name, balance, remaining, pmt, interest_rate, start_date.isoformat()),
                     )
                     conn.commit()
                     st.rerun()
@@ -720,97 +716,70 @@ elif page == "Mortgage Tracker":
 
     status_id = status["id"]
 
-    tab1, tab2, tab3 = st.tabs(["📋 Log Payment", "📈 History", "⚙️ Settings"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Log Payment", "⚡ Balance Adjustment", "📈 History", "⚙️ Settings"])
 
     # ══════════════════════════════════════════════════════════════════════
     # TAB 1: Log Payment
     # ══════════════════════════════════════════════════════════════════════
     with tab1:
         # ── Current snapshot ──────────────────────────────────────────
-        st.subheader("Current Snapshot (from bank)")
-        c1, c2, c3, c4 = st.columns(4)
+        st.subheader("Current Snapshot")
+        c1, c2, c3 = st.columns(3)
         with c1:
             st.metric("Balance", fmt_brl(status["current_balance"]))
         with c2:
             st.metric("Monthly Payment", fmt_brl(status["monthly_payment"]))
         with c3:
             st.metric("Remaining", f"{status['remaining_months']} months")
-        with c4:
-            initial_log = conn.execute(
-                "SELECT balance_after FROM mortgage_log WHERE status_id = ? AND is_correcao = 0 "
-                "ORDER BY log_date LIMIT 1",
-                (status_id,),
-            ).fetchone()
-            init_bal = initial_log["balance_after"] if initial_log else status["current_balance"]
-            progress = ((1 - status["current_balance"] / init_bal) * 100) if init_bal > 0 else 0
-            st.metric("Paid Off", f"{progress:.1f}%")
 
         # ── Log a payment ─────────────────────────────────────────────
         st.markdown("---")
         st.subheader("Log a Payment")
         with st.form("log_payment"):
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1:
+                payment_type = st.selectbox("Type", ["Normal", "Extra"])
                 log_date = st.date_input("Payment Date", value=date.today())
-                payment_total_raw = st.text_input(
-                    "Total Paid (R$)",
-                    value=fmt_brl(status["monthly_payment"]).replace("R$ ", ""),
-                )
                 principal_raw = st.text_input("Principal (R$)", placeholder="e.g. 539,57")
             with c2:
-                interest_raw = st.text_input("Interest (R$)", placeholder="e.g. 289,32")
-                insurance_raw = st.text_input(
-                    "Insurance (R$)",
-                    value=fmt_brl(status["insurance"]).replace("R$ ", "") if status["insurance"] else "",
-                )
-                fees_raw = st.text_input(
-                    "Bank Fees (R$)",
-                    value=fmt_brl(status["fees"]).replace("R$ ", "") if status["fees"] else "",
-                )
-            with c3:
-                extra_raw = st.text_input("Extra Payment (R$)", value="0")
-                balance_after_raw = st.text_input(
-                    "New Balance After (R$)",
-                    placeholder="What your bank shows after payment",
-                )
                 months_after = st.number_input(
                     "Remaining Months After",
                     min_value=0,
                     max_value=600,
                     value=status["remaining_months"] - 1 if status["remaining_months"] > 1 else 0,
                 )
-            notes = st.text_input("Notes (optional)")
+                notes = st.text_input("Notes (optional)")
 
             if st.form_submit_button("Save Payment", use_container_width=True):
-                total = parse_brl(payment_total_raw) if payment_total_raw else 0
                 principal = parse_brl(principal_raw) if principal_raw else 0
-                interest = parse_brl(interest_raw) if interest_raw else 0
-                ins = parse_brl(insurance_raw) if insurance_raw else 0
-                fees = parse_brl(fees_raw) if fees_raw else 0
-                extra = parse_brl(extra_raw) if extra_raw else 0
-                bal_after = parse_brl(balance_after_raw) if balance_after_raw else 0
-
-                if bal_after <= 0:
-                    st.error("Please enter the new balance shown by your bank.")
+                if principal <= 0:
+                    st.error("Please enter the principal amount.")
                 else:
+                    new_balance = status["current_balance"] - principal
+                    if new_balance < 0:
+                        new_balance = 0
                     conn.execute(
-                        "INSERT INTO mortgage_log (status_id, log_date, payment_total, principal, "
-                        "interest, insurance, fees, extra_payment, balance_after, remaining_months_after, notes) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (status_id, log_date.isoformat(), total, principal, interest,
-                         ins, fees, extra, bal_after, months_after, notes),
+                        "INSERT INTO mortgage_log (status_id, log_date, principal, balance_after, "
+                        "remaining_months_after, notes, is_correcao) "
+                        "VALUES (?,?,?,?,?,?,0)",
+                        (status_id, log_date.isoformat(), principal, new_balance, months_after,
+                         f"{payment_type}: {notes}" if notes else payment_type),
                     )
                     conn.execute(
-                        "UPDATE mortgage_status SET current_balance = ?, remaining_months = ?, updated_at = datetime('now') WHERE id = ?",
-                        (bal_after, months_after, status_id),
+                        "UPDATE mortgage_status SET current_balance = ?, remaining_months = ?, "
+                        "updated_at = datetime('now') WHERE id = ?",
+                        (new_balance, months_after, status_id),
                     )
                     conn.commit()
                     st.success("Payment logged!")
                     st.rerun()
 
-        # ── Log a correção monetária ───────────────────────────────────
-        st.markdown("---")
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 2: Balance Adjustment (Correção / TR)
+    # ══════════════════════════════════════════════════════════════════════
+    with tab2:
         st.subheader("Log Balance Adjustment (Correção / TR)")
+        st.caption("When your bank adjusts the balance (e.g. TR, index correction), record the new balance here.")
         with st.form("log_correcao"):
             c1, c2 = st.columns(2)
             with c1:
@@ -822,7 +791,7 @@ elif page == "Mortgage Tracker":
                 )
             with c2:
                 corr_months = st.number_input(
-                    "Remaining Months (if changed)",
+                    "Remaining Months",
                     min_value=0,
                     max_value=600,
                     value=status["remaining_months"],
@@ -833,12 +802,14 @@ elif page == "Mortgage Tracker":
                 cb = parse_brl(corr_balance_raw) if corr_balance_raw else 0
                 if cb > 0:
                     conn.execute(
-                        "INSERT INTO mortgage_log (status_id, log_date, balance_after, remaining_months_after, notes, is_correcao) "
+                        "INSERT INTO mortgage_log (status_id, log_date, balance_after, "
+                        "remaining_months_after, notes, is_correcao) "
                         "VALUES (?,?,?,?,?,1)",
                         (status_id, corr_date.isoformat(), cb, corr_months, corr_notes),
                     )
                     conn.execute(
-                        "UPDATE mortgage_status SET current_balance = ?, remaining_months = ?, updated_at = datetime('now') WHERE id = ?",
+                        "UPDATE mortgage_status SET current_balance = ?, remaining_months = ?, "
+                        "updated_at = datetime('now') WHERE id = ?",
                         (cb, corr_months, status_id),
                     )
                     conn.commit()
@@ -848,33 +819,27 @@ elif page == "Mortgage Tracker":
                     st.error("Please enter a valid balance.")
 
     # ══════════════════════════════════════════════════════════════════════
-    # TAB 2: History
+    # TAB 3: History
     # ══════════════════════════════════════════════════════════════════════
-    with tab2:
+    with tab3:
         logs = conn.execute(
-            "SELECT log_date, payment_total, principal, interest, insurance, fees, "
-            "extra_payment, balance_after, remaining_months_after, notes, is_correcao "
-            "FROM mortgage_log WHERE status_id = ? ORDER BY log_date",
+            "SELECT id, log_date, principal, balance_after, remaining_months_after, "
+            "notes, is_correcao FROM mortgage_log WHERE status_id = ? ORDER BY log_date, id",
             (status_id,),
         ).fetchall()
 
         if logs:
             # Summary stats
-            total_principal = sum(r["principal"] for r in logs)
-            total_interest = sum(r["interest"] for r in logs)
-            total_extras = sum(r["extra_payment"] for r in logs)
-            total_insurance = sum(r["insurance"] for r in logs)
-            total_fees = sum(r["fees"] for r in logs)
+            total_principal = sum(r["principal"] or 0 for r in logs)
+            total_corrections = sum(
+                r["balance_after"] or 0 for r in logs if r["is_correcao"]
+            )
 
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2 = st.columns(2)
             with c1:
                 st.metric("Total Principal Paid", fmt_brl(total_principal))
             with c2:
-                st.metric("Total Interest Paid", fmt_brl(total_interest))
-            with c3:
-                st.metric("Total Extras", fmt_brl(total_extras))
-            with c4:
-                st.metric("Insurance + Fees", fmt_brl(total_insurance + total_fees))
+                st.metric("Entries Logged", len(logs))
 
             # Chart: balance over time
             chart_balances = []
@@ -885,8 +850,6 @@ elif page == "Mortgage Tracker":
                 chart_balances.append(r["balance_after"])
                 if r["is_correcao"]:
                     chart_labels.append("Correção")
-                elif r["extra_payment"] and r["extra_payment"] > 0:
-                    chart_labels.append("Payment + Extra")
                 else:
                     chart_labels.append("Payment")
 
@@ -910,7 +873,7 @@ elif page == "Mortgage Tracker":
             st.plotly_chart(fig, use_container_width=True)
 
             # History table
-            st.subheader("Payment History")
+            st.subheader("History")
             history_data = []
             for r in logs:
                 if r["is_correcao"]:
@@ -920,10 +883,7 @@ elif page == "Mortgage Tracker":
                 history_data.append({
                     "Date": r["log_date"],
                     "Type": label,
-                    "Total": fmt_brl(r["payment_total"]) if r["payment_total"] else "-",
                     "Principal": fmt_brl(r["principal"]) if r["principal"] else "-",
-                    "Interest": fmt_brl(r["interest"]) if r["interest"] else "-",
-                    "Extra": fmt_brl(r["extra_payment"]) if r["extra_payment"] else "-",
                     "Balance After": fmt_brl(r["balance_after"]),
                     "Months Left": r["remaining_months_after"] or "-",
                     "Notes": r["notes"] or "",
@@ -936,14 +896,15 @@ elif page == "Mortgage Tracker":
 
             # Delete entries
             with st.expander("Delete Entries"):
-                to_delete = st.multiselect(
-                    "Select entries to delete",
-                    [f"ID {r['id']}: {r['log_date']}" for r in conn.execute(
-                        "SELECT id, log_date FROM mortgage_log WHERE status_id = ? ORDER BY log_date",
-                        (status_id,),
-                    ).fetchall()],
-                    key="mortgage_delete",
-                )
+                all_log_ids = conn.execute(
+                    "SELECT id, log_date, is_correcao FROM mortgage_log WHERE status_id = ? ORDER BY log_date, id",
+                    (status_id,),
+                ).fetchall()
+                delete_options = [
+                    f"ID {r['id']}: {r['log_date']}" + (" (Correção)" if r["is_correcao"] else " (Payment)")
+                    for r in all_log_ids
+                ]
+                to_delete = st.multiselect("Select entries to delete", delete_options, key="mortgage_delete")
                 if to_delete and st.button("🗑️ Delete Selected", key="del_mortgage"):
                     for item in to_delete:
                         entry_id = int(item.split(":")[0].replace("ID ", ""))
@@ -951,12 +912,12 @@ elif page == "Mortgage Tracker":
                     conn.commit()
                     st.rerun()
         else:
-            st.info("No payments logged yet.")
+            st.info("No entries logged yet.")
 
     # ══════════════════════════════════════════════════════════════════════
-    # TAB 3: Settings
+    # TAB 4: Settings
     # ══════════════════════════════════════════════════════════════════════
-    with tab3:
+    with tab4:
         st.subheader("Update Mortgage Details")
         with st.form("update_mortgage"):
             c1, c2 = st.columns(2)
@@ -969,10 +930,6 @@ elif page == "Mortgage Tracker":
                 new_pmt_raw = st.text_input(
                     "Monthly Payment (R$)",
                     value=fmt_brl(status["monthly_payment"]).replace("R$ ", ""),
-                )
-                new_insurance_raw = st.text_input(
-                    "Insurance (R$)",
-                    value=fmt_brl(status["insurance"]).replace("R$ ", "") if status["insurance"] else "",
                 )
             with c2:
                 new_remaining = st.number_input(
@@ -988,10 +945,6 @@ elif page == "Mortgage Tracker":
                     value=float(status["interest_rate"]),
                     step=0.01,
                 )
-                new_fees_raw = st.text_input(
-                    "Bank Fees (R$)",
-                    value=fmt_brl(status["fees"]).replace("R$ ", "") if status["fees"] else "",
-                )
                 new_start = st.date_input(
                     "Start Date",
                     value=datetime.strptime(status["start_date"], "%Y-%m-%d"),
@@ -999,13 +952,11 @@ elif page == "Mortgage Tracker":
             if st.form_submit_button("Update", use_container_width=True):
                 bal = parse_brl(new_balance_raw) if new_balance_raw else status["current_balance"]
                 pmt = parse_brl(new_pmt_raw) if new_pmt_raw else status["monthly_payment"]
-                ins = parse_brl(new_insurance_raw) if new_insurance_raw else 0
-                fees = parse_brl(new_fees_raw) if new_fees_raw else 0
                 conn.execute(
                     "UPDATE mortgage_status SET name=?, current_balance=?, remaining_months=?, "
-                    "monthly_payment=?, interest_rate=?, start_date=?, insurance=?, fees=?, updated_at=datetime('now') "
+                    "monthly_payment=?, interest_rate=?, start_date=?, updated_at=datetime('now') "
                     "WHERE id=?",
-                    (new_name, bal, new_remaining, pmt, new_rate, new_start.isoformat(), ins, fees, status_id),
+                    (new_name, bal, new_remaining, pmt, new_rate, new_start.isoformat(), status_id),
                 )
                 conn.commit()
                 st.success("Updated!")
