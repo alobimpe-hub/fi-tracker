@@ -67,7 +67,7 @@ def _init_pg():
             m = _re.search(r"//([^.]+)", url.replace("https://", ""))
             ref = m.group(1) if m else url
             _PG_CONFIG = {
-                "dsn": f"postgresql://postgres:{pw}@db.{ref}.supabase.co:5432/postgres",
+                "dsn": f"postgresql://postgres.{ref}:{pw}@aws-0-us-east-2.pooler.supabase.com:5432/postgres",
             }
             _USE_PG = True
     except Exception:
