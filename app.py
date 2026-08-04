@@ -862,7 +862,7 @@ elif page == "Mortgage Tracker":
 
     status = conn.execute(
         "SELECT id, name, current_balance, remaining_months, monthly_payment, "
-        "interest_rate, start_date, insurance, fees FROM mortgage_status ORDER BY id DESC LIMIT 1"
+        "interest_rate, start_date FROM mortgage_status ORDER BY id DESC LIMIT 1"
     ).fetchone()
 
     if not status:
