@@ -67,8 +67,10 @@ def _init_pg():
             m = _re.search(r"//([^.]+)", url.replace("https://", ""))
             ref = m.group(1) if m else url
             _PG_CONFIG = {
-                "host": f"db.{ref}.supabase.co",
+                "host": f"aws-0.sa-east-1.pooler.supabase.com",
                 "password": pw,
+                "user": f"postgres.{ref}",
+                "port": 6543,
             }
             _USE_PG = True
     except Exception:
@@ -82,10 +84,11 @@ def get_db():
     if _USE_PG and psycopg2:
         conn = psycopg2.connect(
             host=_PG_CONFIG["host"],
+            port=_PG_CONFIG.get("port", 5432),
             database="postgres",
-            user="postgres",
+            user=_PG_CONFIG.get("user", "postgres"),
             password=_PG_CONFIG["password"],
-            port=5432,
+            sslmode="require",
         )
         conn.autocommit = False
         return _PgWrapper(conn)
