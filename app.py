@@ -84,8 +84,10 @@ class _CloudDB:
         self.url = url.rstrip("/")
         self.key = key
 
-    def _req(self, method, path, params=None, body=None):
+    def _req(self, method, path, params=None, body=None, extra_headers=None):
         h = {"apikey": self.key, "Authorization": f"Bearer {self.key}"}
+        if extra_headers:
+            h.update(extra_headers)
         r = requests.request(method, f"{self.url}/rest/v1/{path}", headers=h, params=params, json=body, timeout=15)
         r.raise_for_status()
         return r
@@ -93,7 +95,8 @@ class _CloudDB:
     def execute(self, query, params=None):
         if params and not isinstance(params, (list, tuple)):
             params = (params,)
-        q = query.strip()
+        q = query.replace("datetime('now')", f"'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'")
+        q = q.strip()
         qu = q.upper()
         if qu.startswith("SELECT"):
             return _CloudCursor(self._pg_select(q, params))
@@ -167,8 +170,9 @@ class _CloudDB:
                 body[c] = params[i]
 
         if is_replace:
-            rp = {"select": "*", "on_conflict": "id"}
-            r = self._req("POST", table, params=rp, body=body)
+            r = self._req("POST", table, params={"select": "*", "on_conflict": "id"},
+                          body=body,
+                          extra_headers={"Prefer": "resolution=merge-duplicates"})
         else:
             r = self._req("POST", table, params={"select": "*"}, body=body)
         return r.json() if r.text else []
@@ -181,9 +185,15 @@ class _CloudDB:
         remaining = list(params) if params else []
         if sm:
             for part in sm.group(1).split(","):
-                m = _re.match(r"(\w+)\s*=\s*\?", part.strip(), _re.I)
-                if m and remaining:
-                    body[m.group(1)] = remaining.pop(0)
+                m = _re.match(r"(\w+)\s*=\s*(\?|'.+?')", part.strip(), _re.I)
+                if m:
+                    col = m.group(1)
+                    val = m.group(2)
+                    if val == "?":
+                        if remaining:
+                            body[col] = remaining.pop(0)
+                    else:
+                        body[col] = val.strip("'")
 
         rp = {"select": "*"}
         wm = _re.search(r"WHERE\s+(.+?)(?:\s*$)", q, _re.I)
