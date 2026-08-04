@@ -45,18 +45,107 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ── Database ─────────────────────────────────────────────────────────────────
+# ── Database: PostgreSQL (cloud) or SQLite (local) ───────────────────────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "finance_tracker.db")
+_USE_PG = False
+_PG_CONFIG = None
+import re as _re
+
+try:
+    import psycopg2
+    import psycopg2.extras
+except ImportError:
+    psycopg2 = None
+
+
+def _init_pg():
+    global _USE_PG, _PG_CONFIG
+    try:
+        url = st.secrets.get("SUPABASE_URL", "")
+        pw = st.secrets.get("SUPABASE_PASSWORD", "")
+        if url and pw:
+            m = _re.search(r"//([^.]+)", url.replace("https://", ""))
+            ref = m.group(1) if m else url
+            _PG_CONFIG = {
+                "host": f"db.{ref}.supabase.co",
+                "password": pw,
+            }
+            _USE_PG = True
+    except Exception:
+        pass
+
+
+_init_pg()
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    if _USE_PG and psycopg2:
+        conn = psycopg2.connect(
+            host=_PG_CONFIG["host"],
+            database="postgres",
+            user="postgres",
+            password=_PG_CONFIG["password"],
+            port=5432,
+        )
+        conn.autocommit = False
+        return _PgWrapper(conn)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+
+class _PgWrapper:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, query, params=None):
+        q = query.replace("?", "%s")
+        q = q.replace("datetime('now')", "NOW()")
+        if "INSERT OR REPLACE" in q:
+            q = q.replace("INSERT OR REPLACE INTO", "INSERT INTO")
+            if "ON CONFLICT" not in q:
+                q += " ON CONFLICT (id) DO UPDATE SET monthly_expenses=EXCLUDED.monthly_expenses, withdrawal_rate=EXCLUDED.withdrawal_rate, updated_at=EXCLUDED.updated_at"
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if params:
+            cur.execute(q, params)
+        else:
+            cur.execute(q)
+        return _PgCursor(cur)
+
+    def executescript(self, script):
+        cur = self._conn.cursor()
+        for stmt in script.split(";"):
+            stmt = stmt.strip()
+            if stmt and not stmt.startswith("--"):
+                try:
+                    cur.execute(stmt)
+                except Exception:
+                    pass
+        cur.close()
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+class _PgCursor:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
 
 
 def init_db():
+    if _USE_PG:
+        return
     conn = get_db()
     conn.executescript(
         """
