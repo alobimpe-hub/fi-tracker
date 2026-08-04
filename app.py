@@ -170,9 +170,12 @@ class _CloudDB:
                 body[c] = params[i]
 
         if is_replace:
-            r = self._req("POST", table, params={"select": "*", "on_conflict": "id"},
-                          body=body,
-                          extra_headers={"Prefer": "resolution=merge-duplicates"})
+            id_val = body.get("id", 1)
+            try:
+                self._req("DELETE", table, params={"id": f"eq.{id_val}"})
+            except Exception:
+                pass
+            r = self._req("POST", table, params={"select": "*"}, body=body)
         else:
             r = self._req("POST", table, params={"select": "*"}, body=body)
         return r.json() if r.text else []
