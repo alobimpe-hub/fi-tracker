@@ -67,7 +67,7 @@ def _init_pg():
             m = _re.search(r"//([^.]+)", url.replace("https://", ""))
             ref = m.group(1) if m else url
             _PG_CONFIG = {
-                "host": f"aws-0.sa-east-1.pooler.supabase.com",
+                "host": f"aws-0.us-east-2.pooler.supabase.com",
                 "password": pw,
                 "user": f"postgres.{ref}",
                 "port": 6543,
