@@ -94,8 +94,34 @@ class _CloudDB:
 
     def execute(self, query, params=None):
         if params and not isinstance(params, (list, tuple)):
-            params = (params,)
-        q = query.replace("datetime('now')", f"'{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'")
+            params = tuple(params) if params else ()
+        else:
+            params = tuple(params) if params else ()
+        params = list(params)
+        q = query
+        while "datetime('now')" in q:
+            q = q.replace("datetime('now')", "?", 1)
+            params.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        # Replace literal integers in VALUES (...) with ? params
+        vm = _re.search(r"VALUES\s*\((.+?)\)", q, _re.I)
+        if vm:
+            vals = vm.group(1)
+            new_vals = []
+            front_params = []
+            for v in vals.split(","):
+                v = v.strip()
+                if v == "?":
+                    new_vals.append("?")
+                elif _re.match(r"^-?\d+(\.\d+)?$", v):
+                    new_vals.append("?")
+                    front_params.append(float(v) if "." in v else int(v))
+                elif v.startswith("'") and v.endswith("'"):
+                    new_vals.append("?")
+                    front_params.append(v.strip("'"))
+                else:
+                    new_vals.append(v)
+            q = q.replace(vals, ", ".join(new_vals))
+            params = front_params + params
         q = q.strip()
         qu = q.upper()
         if qu.startswith("SELECT"):
