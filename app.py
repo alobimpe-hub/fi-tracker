@@ -9,6 +9,7 @@ from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
 import requests
 import os
+import re as _re
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -45,43 +46,32 @@ def check_password():
 if not check_password():
     st.stop()
 
-# ── Database: PostgreSQL (cloud) or SQLite (local) ───────────────────────────
+# ── Database: Supabase REST (cloud) or SQLite (local) ───────────────────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "finance_tracker.db")
-_USE_PG = False
-_PG_CONFIG = None
-import re as _re
-
-try:
-    import psycopg2
-    import psycopg2.extras
-except ImportError:
-    psycopg2 = None
+_USE_CLOUD = False
+_CLOUD_URL = ""
+_CLOUD_KEY = ""
 
 
-def _init_pg():
-    global _USE_PG, _PG_CONFIG
+def _init_cloud():
+    global _USE_CLOUD, _CLOUD_URL, _CLOUD_KEY
     try:
         url = st.secrets.get("SUPABASE_URL", "")
-        pw = st.secrets.get("SUPABASE_PASSWORD", "")
-        if url and pw:
-            m = _re.search(r"//([^.]+)", url.replace("https://", ""))
-            ref = m.group(1) if m else url
-            _PG_CONFIG = {
-                "dsn": f"postgresql://postgres.{ref}:{pw}@aws-0-us-east-2.pooler.supabase.com:5432/postgres",
-            }
-            _USE_PG = True
+        key = st.secrets.get("SUPABASE_ANON_KEY", "")
+        if url and key:
+            _CLOUD_URL = url
+            _CLOUD_KEY = key
+            _USE_CLOUD = True
     except Exception:
         pass
 
 
-_init_pg()
+_init_cloud()
 
 
 def get_db():
-    if _USE_PG and psycopg2:
-        conn = psycopg2.connect(_PG_CONFIG["dsn"])
-        conn.autocommit = False
-        return _PgWrapper(conn)
+    if _USE_CLOUD:
+        return _CloudDB(_CLOUD_URL, _CLOUD_KEY)
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -89,55 +79,161 @@ def get_db():
         return conn
 
 
-class _PgWrapper:
-    def __init__(self, conn):
-        self._conn = conn
+class _CloudDB:
+    def __init__(self, url, key):
+        self.url = url.rstrip("/")
+        self.key = key
+
+    def _req(self, method, path, params=None, body=None):
+        h = {"apikey": self.key, "Authorization": f"Bearer {self.key}"}
+        r = requests.request(method, f"{self.url}/rest/v1/{path}", headers=h, params=params, json=body, timeout=15)
+        r.raise_for_status()
+        return r
 
     def execute(self, query, params=None):
-        q = query.replace("?", "%s")
-        q = q.replace("datetime('now')", "NOW()")
-        if "INSERT OR REPLACE" in q:
-            q = q.replace("INSERT OR REPLACE INTO", "INSERT INTO")
-            if "ON CONFLICT" not in q:
-                q += " ON CONFLICT (id) DO UPDATE SET monthly_expenses=EXCLUDED.monthly_expenses, withdrawal_rate=EXCLUDED.withdrawal_rate, updated_at=EXCLUDED.updated_at"
-        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        if params:
-            cur.execute(q, params)
+        if params and not isinstance(params, (list, tuple)):
+            params = (params,)
+        q = query.strip()
+        qu = q.upper()
+        if qu.startswith("SELECT"):
+            return _CloudCursor(self._pg_select(q, params))
+        elif qu.startswith("INSERT"):
+            return _CloudCursor(self._pg_insert(q, params))
+        elif qu.startswith("UPDATE"):
+            return _CloudCursor(self._pg_update(q, params))
+        elif qu.startswith("DELETE"):
+            return _CloudCursor(self._pg_delete(q, params))
+        return _CloudCursor([])
+
+    def _pg_select(self, q, params):
+        table = _re.search(r"FROM\s+(\w+)", q, _re.I).group(1)
+        cols_match = _re.search(r"SELECT\s+(.+?)\s+FROM", q, _re.I)
+        cols = cols_match.group(1).strip() if cols_match else "*"
+
+        rp = {}
+        if "COUNT" in cols.upper() or "SUM" in cols.upper():
+            rp["select"] = "*"
+        elif cols == "*":
+            rp["select"] = "*"
         else:
-            cur.execute(q)
-        return _PgCursor(cur)
+            rp["select"] = cols
+
+        wm = _re.search(r"WHERE\s+(.+?)(?:\s+ORDER|\s+LIMIT|\s*$)", q, _re.I)
+        if wm and params:
+            wc = wm.group(1)
+            remaining = list(params)
+            for part in wc.split("AND"):
+                m = _re.match(r"(\w+)\s*=\s*\?", part.strip(), _re.I)
+                if m and remaining:
+                    rp[m.group(1)] = f"eq.{remaining.pop(0)}"
+
+        om = _re.search(r"ORDER BY\s+(\w+)\s*(DESC)?", q, _re.I)
+        if om:
+            d = ".desc" if (om.group(2) or "").upper() == "DESC" else ".asc"
+            rp["order"] = f"{om.group(1)}{d}"
+
+        lm = _re.search(r"LIMIT\s+(\d+)", q, _re.I)
+        if lm:
+            rp["limit"] = lm.group(1)
+
+        data = self._req("GET", table, params=rp).json()
+
+        if "COUNT" in cols.upper() or "SUM" in cols.upper():
+            result = {}
+            for ce in cols.split(","):
+                ce = ce.strip()
+                cm = _re.match(r"(?:COUNT|SUM)\(\*\)\s+(?:AS\s+)?(\w+)", ce, _re.I)
+                if cm:
+                    alias = cm.group(1)
+                    if "COUNT" in ce.upper():
+                        result[alias] = len(data)
+                cs = _re.match(r"(?:SUM)\((\w+)\)\s+(?:AS\s+)?(\w+)", ce, _re.I)
+                if cs:
+                    alias = cs.group(2)
+                    col = cs.group(1)
+                    result[alias] = sum((r.get(col, 0) or 0) for r in data)
+            return [result]
+        return data or []
+
+    def _pg_insert(self, q, params):
+        table = _re.search(r"INTO\s+(\w+)", q, _re.I).group(1)
+        cm = _re.search(r"\((.+?)\)", q)
+        cols = [c.strip() for c in cm.group(1).split(",")] if cm else []
+
+        is_replace = "OR REPLACE" in q.upper()
+        body = {}
+        for i, c in enumerate(cols):
+            if params and i < len(params):
+                body[c] = params[i]
+
+        if is_replace:
+            rp = {"select": "*", "on_conflict": "id"}
+            r = self._req("POST", table, params=rp, body=body)
+        else:
+            r = self._req("POST", table, params={"select": "*"}, body=body)
+        return r.json() if r.text else []
+
+    def _pg_update(self, q, params):
+        table = _re.search(r"UPDATE\s+(\w+)", q, _re.I).group(1)
+
+        sm = _re.search(r"SET\s+(.+?)(?:\s+WHERE|\s*$)", q, _re.I)
+        body = {}
+        remaining = list(params) if params else []
+        if sm:
+            for part in sm.group(1).split(","):
+                m = _re.match(r"(\w+)\s*=\s*\?", part.strip(), _re.I)
+                if m and remaining:
+                    body[m.group(1)] = remaining.pop(0)
+
+        rp = {"select": "*"}
+        wm = _re.search(r"WHERE\s+(.+?)(?:\s*$)", q, _re.I)
+        if wm:
+            for part in wm.group(1).split("AND"):
+                m = _re.match(r"(\w+)\s*=\s*\?", part.strip(), _re.I)
+                if m and remaining:
+                    rp[m.group(1)] = f"eq.{remaining.pop(0)}"
+
+        r = self._req("PATCH", table, params=rp, body=body)
+        return r.json() if r.text else []
+
+    def _pg_delete(self, q, params):
+        table = _re.search(r"FROM\s+(\w+)", q, _re.I).group(1)
+
+        rp = {}
+        remaining = list(params) if params else []
+        wm = _re.search(r"WHERE\s+(.+?)(?:\s*$)", q, _re.I)
+        if wm:
+            for part in wm.group(1).split("AND"):
+                m = _re.match(r"(\w+)\s*=\s*\?", part.strip(), _re.I)
+                if m and remaining:
+                    rp[m.group(1)] = f"eq.{remaining.pop(0)}"
+
+        r = self._req("DELETE", table, params=rp)
+        return r.json() if r.text else []
 
     def executescript(self, script):
-        cur = self._conn.cursor()
-        for stmt in script.split(";"):
-            stmt = stmt.strip()
-            if stmt and not stmt.startswith("--"):
-                try:
-                    cur.execute(stmt)
-                except Exception:
-                    pass
-        cur.close()
+        pass
 
     def commit(self):
-        self._conn.commit()
+        pass
 
     def close(self):
-        self._conn.close()
+        pass
 
 
-class _PgCursor:
-    def __init__(self, cur):
-        self._cur = cur
+class _CloudCursor:
+    def __init__(self, data):
+        self._data = data
 
     def fetchone(self):
-        return self._cur.fetchone()
+        return self._data[0] if self._data else None
 
     def fetchall(self):
-        return self._cur.fetchall()
+        return self._data
 
 
 def init_db():
-    if _USE_PG:
+    if _USE_CLOUD:
         return
     conn = get_db()
     conn.executescript(
